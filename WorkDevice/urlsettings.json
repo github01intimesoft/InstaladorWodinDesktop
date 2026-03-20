@@ -1,0 +1,8 @@
+{
+	"ProtocoloUrl": "https://",
+	"DefaultSubDomain": "www",
+	"DefaultDomain": "wodin.com.br",
+
+	"_ProtocoloUrl": "http://",
+	"_DefaultDomain": "localhost:61201"
+}
