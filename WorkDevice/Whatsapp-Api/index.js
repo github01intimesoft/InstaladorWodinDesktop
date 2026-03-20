@@ -199,6 +199,11 @@ client.on('exit', async () => {
 
 async function inserirRoboNaPagina() {
     await client.pupPage.evaluate(() => {
+        if (window.Robo) {
+            console.log("Robo já está injetado.");
+            return;
+        }
+
         const Robo = {
             contatosPausados: [],
             contatosAtendimentos: [],
@@ -397,20 +402,23 @@ async function inserirRoboNaPagina() {
     });
 } 
 
-client.on('ready', async () => { // Função orquestradora. // TODO: Implementar o sistema de Retry! Todo programa pequeno independente tem isso. Assim, quando a conexão cair, tenta se reconectar automáticamente.
-    isWhatsAppConectado = true;
+client.on('ready', async () => {
+    try {
+        isWhatsAppConectado = true;
+        verificarConexaoCompleta();
+                
+        await inserirRoboNaPagina();
 
-    verificarConexaoCompleta();
+        await connection.invoke("OnEventReceived", {
+            EventType: EVENT_TYPE.WHATSAPP_MONITORY,
+            Data: {}
+        });
 
-    await inserirRoboNaPagina();
-    
-    await connection.invoke("OnEventReceived", {
-        EventType: EVENT_TYPE.WHATSAPP_MONITORY,
-        Data: {}
-    });
-
-    console.log('Cliente do WhatsApp pronto e conectado!');    
- });
+        console.log('Cliente do WhatsApp pronto e conectado!');
+    } catch (error) {
+        console.error("Erro ao finalizar inicialização do WhatsApp:", error);
+    }
+});
 
 client.on('disconnected', (reason) => {
     console.warn('⚠️ WhatsApp desconectado!', reason);

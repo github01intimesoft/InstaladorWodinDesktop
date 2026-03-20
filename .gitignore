@@ -1,0 +1,16 @@
+# C# build
+bin/
+obj/
+
+# Node
+node_modules/
+
+# Instalador gerado
+InstallerOutput/
+
+# Logs
+*.log
+
+# Arquivos temporários
+*.tmp
+*.cache
