@@ -14,6 +14,7 @@ ArchitecturesInstallIn64BitMode=x64
 PrivilegesRequired=admin
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\Wodin.WorkDevice.Desktop.exe
+SetupIconFile=wodin.ico
 
 [Languages]
 Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
