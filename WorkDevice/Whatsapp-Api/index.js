@@ -1,96 +1,131 @@
-const express = require('express'); 
+const express = require('express');
 const signalR = require("@microsoft/signalr");
 const cors = require('cors');
 const qrcode = require('qrcode-terminal');
-
 const puppeteer = require('puppeteer');
-const http = require('http'); 
+const http = require('http');
+
+const { Client } = require('whatsapp-web.js');
 
 const PORTA_API = process.env.PORTA_API || 3000;
 const PORTA_NAVEGADOR = process.env.PORTA_NAVEGADOR_CSHARP || 9222;
-// const URL_SIGNALR = "http://localhost:61201/WorkDeviceHub"; 
-const URL_SIGNALR = "https://www.wodin.com.br/WorkDeviceHub"; 
+// const URL_SIGNALR = "http://localhost:61201/WorkDeviceHub";
+const URL_SIGNALR = "https://www.wodin.com.br/WorkDeviceHub";
 
+const app = express();
+app.use(express.json());
+app.use(cors());
 
-// --- TRAVA DE SEGURANÇA DE CONEXÃO ---
-let isSignalRConectado = false;
-let isWhatsAppConectado = false;
-let timeoutConexao = null; 
-const TEMPO_MAXIMO_DESCONECTADO = 30000; 
+const EVENT_TYPE = {
+    WHATSAPP_MESSAGE_RECEIVED: 0,
+    WHATSAPP_EXIT: 1,
+    WHATSAPP_MONITORY: 2,
+    BATTERY_CHANGED: 3
+};
 
-function iniciarTravaSeguranca() {   
-    if (!timeoutConexao) {
-        console.log(`⏳ Iniciando trava de segurança de ${TEMPO_MAXIMO_DESCONECTADO / 1000}s...`);
-        timeoutConexao = setTimeout(() => {
-            if (!isSignalRConectado || !isWhatsAppConectado) {
-                console.error("⏳ Tempo limite esgotado! Uma das conexões não foi recuperada.");
-                console.error(`Status final -> SignalR: ${isSignalRConectado} | WhatsApp: ${isWhatsAppConectado}`);
-                process.exit(1); 
-            }
-        }, TEMPO_MAXIMO_DESCONECTADO);
+const WhatsAppState = Object.freeze({
+    INICIANDO: "INICIANDO",
+    AGUARDANDO_NAVEGADOR: "AGUARDANDO_NAVEGADOR",
+    AGUARDANDO_QR: "AGUARDANDO_QR",
+    CONECTADO: "CONECTADO",
+    DESCONECTADO_TEMPORARIO: "DESCONECTADO_TEMPORARIO",
+    ERRO_FATAL: "ERRO_FATAL"
+});
+
+const SignalRState = Object.freeze({
+    CONECTANDO: "CONECTANDO",
+    CONECTADO: "CONECTADO",
+    RECONECTANDO: "RECONECTANDO",
+    DESCONECTADO: "DESCONECTADO"
+});
+
+let whatsappState = WhatsAppState.INICIANDO;
+let signalRState = SignalRState.CONECTANDO;
+let timeoutConexao = null;
+
+const TEMPO_MAXIMO_DESCONECTADO = 30000;
+
+// --------------------------------------------------
+// MONITOR DE SAÚDE / TRAVA DE SEGURANÇA
+// --------------------------------------------------
+
+function cancelarTravaSeguranca() {
+    if (timeoutConexao) {
+        clearTimeout(timeoutConexao);
+        timeoutConexao = null;
+        console.log("🛑 Trava de segurança cancelada.");
     }
 }
 
-function verificarConexaoCompleta() {
-    if(timeoutConexao == null) 
+function deveIniciarTrava() {
+    const signalRFora = signalRState !== SignalRState.CONECTADO;
+
+    const whatsappPrecisaRecuperar =
+        whatsappState === WhatsAppState.DESCONECTADO_TEMPORARIO ||
+        whatsappState === WhatsAppState.AGUARDANDO_NAVEGADOR;
+
+    const whatsappNaoEhFalhaFatal =
+        whatsappState === WhatsAppState.AGUARDANDO_QR ||
+        whatsappState === WhatsAppState.INICIANDO;
+
+    if (whatsappNaoEhFalhaFatal) {
+        return signalRFora;
+    }
+
+    return signalRFora || whatsappPrecisaRecuperar;
+}
+
+function iniciarTravaSeguranca() {
+    if (timeoutConexao || !deveIniciarTrava()) {
         return;
+    }
 
-    if (isSignalRConectado && isWhatsAppConectado) {
-        console.log("✅ WhatsApp e SignalR estabilizados! Cancelando trava de segurança.");
-        if (timeoutConexao) {
-            clearTimeout(timeoutConexao);
-            timeoutConexao = null;
+    console.log(`⏳ Iniciando trava de segurança de ${TEMPO_MAXIMO_DESCONECTADO / 1000}s...`);
+
+    timeoutConexao = setTimeout(() => {
+        timeoutConexao = null;
+
+        if (!deveIniciarTrava()) {
+            console.log("✅ Sistema recuperado antes do timeout.");
+            return;
         }
+
+        console.error("⏳ Tempo limite esgotado! O sistema não se recuperou.");
+        console.error(`Status final -> SignalR: ${signalRState} | WhatsApp: ${whatsappState}`);
+        process.exit(1);
+    }, TEMPO_MAXIMO_DESCONECTADO);
+}
+
+function reavaliarSaudeSistema() {
+    if (deveIniciarTrava()) {
+        iniciarTravaSeguranca();
+    } else {
+        cancelarTravaSeguranca();
     }
 }
 
-iniciarTravaSeguranca();
-
+// --------------------------------------------------
+// PUPPETEER: REAPROVEITAR ABA DO C#
+// --------------------------------------------------
 
 const originalConnect = puppeteer.connect;
-puppeteer.connect = async function(options) {
-    const browser = await originalConnect.apply(this, arguments); 
-    
-    const pages = await browser.pages(); 
+puppeteer.connect = async function () {
+    const browser = await originalConnect.apply(this, arguments);
+
+    const pages = await browser.pages();
     const whatsappPage = pages.find(p => p.url().includes('whatsapp')) || pages[0];
 
-    browser.newPage = async function() { 
-        console.log("🎯 Evitando popup! Injetando a aba do C# na biblioteca..."); 
+    browser.newPage = async function () {
+        console.log("🎯 Evitando popup! Injetando a aba do C# na biblioteca...");
         return whatsappPage;
     };
 
     return browser;
 };
 
-// Função para executar código na página com segurança contra frames desconectados
-async function executarNaPagina(callback, ...args) {
-    try {
-        // Tenta recuperar a página atualizada do cliente
-        const page = client.pupPage;
-        if (!page || page.isClosed()) {
-            throw new Error("Página fechada ou inválida");
-        }
-        return await page.evaluate(callback, ...args);
-    } catch (error) {
-        if (error.message.includes('detached Frame') || error.message.includes('Execution context was destroyed')) {
-            console.warn("⚠️ Frame desconectado detectado! Tentando recuperar a página...");
-            // Força a biblioteca a re-focar na aba correta
-            const pages = await client.pupBrowser.pages();
-            client.pupPage = pages.find(p => p.url().includes('whatsapp')) || pages[0];
-            
-            // Tenta de novo uma única vez após recuperar
-            return await client.pupPage.evaluate(callback, ...args);
-        }
-        throw error; // Se for outro erro, repassa
-    }
-}
-
-
-const { Client } = require('whatsapp-web.js');
-
-const app = express();
-app.use(express.json());
-app.use(cors());
+// --------------------------------------------------
+// CLIENTE WHATSAPP
+// --------------------------------------------------
 
 const client = new Client({
     puppeteer: {
@@ -99,81 +134,119 @@ const client = new Client({
     }
 });
 
-const EVENT_TYPE = { 
-    WHATSAPP_MESSAGE_RECEIVED: 0,    
-    WHATSAPP_EXIT: 1,
-    WHATSAPP_MONITORY: 2,
-    BATTERY_CHANGED: 3
-};
+// --------------------------------------------------
+// SIGNALR
+// --------------------------------------------------
 
 const connection = new signalR.HubConnectionBuilder()
-    .withUrl(URL_SIGNALR, { 
+    .withUrl(URL_SIGNALR, {
         transport: signalR.HttpTransportType.WebSockets,
         skipNegotiation: true
     })
     .withAutomaticReconnect()
     .build();
 
-
 connection.onreconnecting((error) => {
     console.warn("⚠️ SignalR perdeu conexão e está tentando reconectar...", error);
-    isSignalRConectado = false;
-    iniciarTravaSeguranca();
+    signalRState = SignalRState.RECONECTANDO;
+    reavaliarSaudeSistema();
 });
 
-connection.onreconnected((connectionId) => {
+connection.onreconnected(() => {
     console.log("🔄 SignalR reconectado com sucesso!");
-    isSignalRConectado = true;
-    verificarConexaoCompleta();
+    signalRState = SignalRState.CONECTADO;
+    reavaliarSaudeSistema();
 });
 
 connection.onclose((error) => {
     console.error("❌ Conexão com SignalR fechada.", error);
-    isSignalRConectado = false;
-    iniciarTravaSeguranca();
+    signalRState = SignalRState.DESCONECTADO;
+    reavaliarSaudeSistema();
 });
 
 async function startSignalR() {
     try {
         await connection.start();
-        isSignalRConectado = true;
-        verificarConexaoCompleta();
-        console.log("Conectado ao Hub SignalR do C#!"); 
+        signalRState = SignalRState.CONECTADO;
+        console.log("Conectado ao Hub SignalR do C#!");
+        reavaliarSaudeSistema();
     } catch (err) {
-        console.error("Erro ao conectar no SignalR:", err); 
+        signalRState = SignalRState.DESCONECTADO;
+        console.error("Erro ao conectar no SignalR:", err);
+        reavaliarSaudeSistema();
         setTimeout(startSignalR, 5000);
     }
 }
+
 startSignalR();
 
-function isAGroupMessage(chatId) { 
+// --------------------------------------------------
+// UTILITÁRIOS
+// --------------------------------------------------
+
+function isAGroupMessage(chatId) {
     return typeof chatId === 'string' && chatId.endsWith('@g.us');
 }
 
-client.on('message', async (msg) => {
-    const chatId = msg.from;   
-    if(!(["558293446767@c.us", "55828883-7851@c.us", "55828815-1864@c.us", "55828878-5029@c.us"].includes(chatId))) return;
-
-    const podeReceberMensagem = await client.pupPage.evaluate(
-        (id) => window.Robo?.canContatoReceberMensagem(id) ?? true,
-        chatId
-    );
-
-    if (!podeReceberMensagem || isAGroupMessage(chatId)) 
-        return;
-    
+async function executarNaPagina(callback, ...args) {
     try {
+        const page = client.pupPage;
+        if (!page || page.isClosed()) {
+            throw new Error("Página fechada ou inválida");
+        }
+        return await page.evaluate(callback, ...args);
+    } catch (error) {
+        if (
+            error.message.includes('detached Frame') ||
+            error.message.includes('Execution context was destroyed')
+        ) {
+            console.warn("⚠️ Frame desconectado detectado! Tentando recuperar a página...");
+            const pages = await client.pupBrowser.pages();
+            client.pupPage = pages.find(p => p.url().includes('whatsapp')) || pages[0];
+            return await client.pupPage.evaluate(callback, ...args);
+        }
+
+        throw error;
+    }
+}
+
+// --------------------------------------------------
+// EVENTOS DO WHATSAPP
+// --------------------------------------------------
+
+client.on('message', async (msg) => {
+    try {
+        const chatId = msg.from;
+
+        if (![
+            "558293446767@c.us",
+            "55828883-7851@c.us",
+            "55828815-1864@c.us",
+            "55828878-5029@c.us"
+        ].includes(chatId)) {
+            return;
+        }
+
+        const podeReceberMensagem = await executarNaPagina(
+            (id) => window.Robo?.canContatoReceberMensagem(id) ?? true,
+            chatId
+        );
+
+        if (!podeReceberMensagem || isAGroupMessage(chatId)) {
+            return;
+        }
+
         await connection.invoke("OnEventReceived", {
             EventType: EVENT_TYPE.WHATSAPP_MESSAGE_RECEIVED,
             Data: {
                 AsFrom: msg.from,
                 Body: msg.body,
-                NotifyName: msg._data.notifyName,
+                NotifyName: msg._data?.notifyName || "",
                 CountryCodeAsFrom: "55"
             }
         });
     } catch (err) {
-        console.error("Erro ao enviar evento para SignalR:", err);
+        console.error("Erro ao processar mensagem recebida:", err);
     }
 });
 
@@ -189,13 +262,65 @@ client.on('battery_changed', async (battery) => {
 });
 
 client.on('qr', (qr) => {
+    whatsappState = WhatsAppState.AGUARDANDO_QR;
+    reavaliarSaudeSistema();
+
     qrcode.generate(qr, { small: true });
-    console.log('Leia o QR Code acima com o seu aplicativo do WhatsApp.'); 
+    console.log('Leia o QR Code acima com o seu aplicativo do WhatsApp.');
+});
+
+client.on('ready', async () => {
+    try {
+        whatsappState = WhatsAppState.CONECTADO;
+        reavaliarSaudeSistema();
+
+        await inserirRoboNaPagina();
+
+        await connection.invoke("OnEventReceived", {
+            EventType: EVENT_TYPE.WHATSAPP_MONITORY,
+            Data: {}
+        });
+
+        console.log('Cliente do WhatsApp pronto e conectado!');
+    } catch (error) {
+        console.error("Erro ao finalizar inicialização do WhatsApp:", error);
+    }
+});
+
+client.on('disconnected', (reason) => {
+    console.warn('⚠️ WhatsApp desconectado!', reason);
+
+    const motivo = String(reason || "").toLowerCase();
+
+    if (
+        motivo.includes("logout") ||
+        motivo.includes("logged out") ||
+        motivo.includes("navigation")
+    ) {
+        whatsappState = WhatsAppState.AGUARDANDO_QR;
+    } else {
+        whatsappState = WhatsAppState.DESCONECTADO_TEMPORARIO;
+    }
+
+    reavaliarSaudeSistema();
 });
 
 client.on('exit', async () => {
     console.log('O usuário foi desligado.');
+
+    try {
+        await connection.invoke("OnEventReceived", {
+            EventType: EVENT_TYPE.WHATSAPP_EXIT,
+            Data: {}
+        });
+    } catch (err) {
+        console.error("Erro ao enviar evento de saída:", err);
+    }
 });
+
+// --------------------------------------------------
+// INJEÇÃO DO ROBÔ NA PÁGINA
+// --------------------------------------------------
 
 async function inserirRoboNaPagina() {
     await client.pupPage.evaluate(() => {
@@ -402,105 +527,103 @@ async function inserirRoboNaPagina() {
     });
 } 
 
-client.on('ready', async () => {
-    try {
-        isWhatsAppConectado = true;
-        verificarConexaoCompleta();
-                
-        await inserirRoboNaPagina();
 
-        await connection.invoke("OnEventReceived", {
-            EventType: EVENT_TYPE.WHATSAPP_MONITORY,
-            Data: {}
-        });
-
-        console.log('Cliente do WhatsApp pronto e conectado!');
-    } catch (error) {
-        console.error("Erro ao finalizar inicialização do WhatsApp:", error);
-    }
-});
-
-client.on('disconnected', (reason) => {
-    console.warn('⚠️ WhatsApp desconectado!', reason);
-    isWhatsAppConectado = false;
-    iniciarTravaSeguranca();
-});
+// --------------------------------------------------
+// API
+// --------------------------------------------------
 
 app.post('/api/ativarContato', async (req, res) => {
-    const { chatId } = req.body; 
+    try {
+        const { chatId } = req.body;
 
-    if (!chatId) { 
-        return res.status(400).json({ sucesso: false, erro: "O ChatId é obrigatório." }); 
+        if (!chatId) {
+            return res.status(400).json({ sucesso: false, erro: "O ChatId é obrigatório." });
+        }
+
+        await executarNaPagina((id) => {
+            if (window.Robo) window.Robo.ativarContatoAtendimento(id);
+        }, chatId);
+
+        res.status(200).json({ sucesso: true, mensagem: 'O contato foi ativado!' });
+    } catch (error) {
+        res.status(500).json({ sucesso: false, erro: error.message });
     }
-
-    await executarNaPagina((id) => {
-        if (window.Robo) window.Robo.ativarContatoAtendimento(id);
-    }, chatId);
-
-    res.status(200)
-        .json({ sucesso: true, mensagem: 'O contato foi ativado!' });
 });
 
 app.post('/api/desativarContato', async (req, res) => {
-    const { chatId } = req.body; 
+    try {
+        const { chatId } = req.body;
 
-    if (!chatId) {  
-        return res.status(400).json({ sucesso: false, erro: "O ChatId é obrigatório." }); 
+        if (!chatId) {
+            return res.status(400).json({ sucesso: false, erro: "O ChatId é obrigatório." });
+        }
+
+        await executarNaPagina((id) => {
+            if (window.Robo) window.Robo.desativarContatoAtendimento(id);
+        }, chatId);
+
+        res.status(200).json({ sucesso: true, mensagem: 'O contato foi desativado!' });
+    } catch (error) {
+        res.status(500).json({ sucesso: false, erro: error.message });
     }
-
-    await executarNaPagina((id) => {
-        if (window.Robo) window.Robo.desativarContatoAtendimento(id);
-    }, chatId);
-
-    res.status(200)
-        .json({ sucesso: true, mensagem: 'O contato foi desativado!' }); 
 });
 
 app.post('/api/enviar', async (req, res) => {
-    const { numero, mensagem } = req.body;    
-
-    if (!numero || !mensagem) { 
-        return res.status(400).json({ sucesso: false, erro: "Número e mensagem são obrigatórios." }); 
-    }
-
-    const chatId = `${numero}@c.us`;
-
     try {
+        const { numero, mensagem } = req.body;
+
+        if (!numero || !mensagem) {
+            return res.status(400).json({ sucesso: false, erro: "Número e mensagem são obrigatórios." });
+        }
+
+        const chatId = `${numero}@c.us`;
+
         const chat = await client.getChatById(chatId);
 
         await chat.sendStateTyping();
         await new Promise(resolve => setTimeout(resolve, 3000));
-        
+
         await client.sendMessage(chatId, mensagem);
 
         await chat.clearState();
 
-        res.status(200).json({ sucesso: true, mensagem: 'Mensagem enviada!' }); 
+        res.status(200).json({ sucesso: true, mensagem: 'Mensagem enviada!' });
     } catch (error) {
-        res.status(500).json({ sucesso: false, erro: error.message }); 
+        res.status(500).json({ sucesso: false, erro: error.message });
     }
 });
+
+// --------------------------------------------------
+// INICIAR QUANDO O NAVEGADOR DO C# ESTIVER PRONTO
+// --------------------------------------------------
 
 function iniciarQuandoNavegadorEstiverPronto() {
     console.log(`📡 Procurando o navegador do C# na porta ${PORTA_NAVEGADOR}...`);
 
+    whatsappState = WhatsAppState.AGUARDANDO_NAVEGADOR;
+    reavaliarSaudeSistema();
+
     const req = http.get(`http://127.0.0.1:${PORTA_NAVEGADOR}/json/version`, (res) => {
         if (res.statusCode === 200) {
             console.log("✅ Navegador C# encontrado! Iniciando a biblioteca do WhatsApp...");
-            
+
+            whatsappState = WhatsAppState.INICIANDO;
+            reavaliarSaudeSistema();
+
             client.initialize().catch(err => {
+                whatsappState = WhatsAppState.ERRO_FATAL;
+                reavaliarSaudeSistema();
                 console.error("Erro interno no whatsapp-web.js:", err);
             });
-        } else {            
+        } else {
             setTimeout(iniciarQuandoNavegadorEstiverPronto, 3000);
         }
     });
 
-    req.on('error', (err) => {
+    req.on('error', () => {
         console.log("⚠️ Navegador ainda não respondeu. Tentando novamente em 3 segundos...");
-        isWhatsAppConectado = false;
-
-        iniciarTravaSeguranca();         
+        whatsappState = WhatsAppState.AGUARDANDO_NAVEGADOR;
+        reavaliarSaudeSistema();
         setTimeout(iniciarQuandoNavegadorEstiverPronto, 3000);
     });
 
@@ -511,8 +634,10 @@ function iniciarQuandoNavegadorEstiverPronto() {
 
 iniciarQuandoNavegadorEstiverPronto();
 
+// --------------------------------------------------
+// START API
+// --------------------------------------------------
+
 app.listen(PORTA_API, () => {
     console.log(`API do WhatsApp rodando em http://localhost:${PORTA_API}`);
 });
-
-
