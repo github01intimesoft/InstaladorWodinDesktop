@@ -11,7 +11,7 @@ Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64
-PrivilegesRequired=admin
+PrivilegesRequired=lowest
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\Wodin.WorkDevice.Desktop.exe
 SetupIconFile=wodin.ico
@@ -81,6 +81,8 @@ var
 begin
   ConfigPath := ExpandConstant('{app}\appsettings.json');
 
+  ForceDirectories(ExtractFileDir(ConfigPath));
+
   JsonContent :=
     '{' + #13#10 +
     '  "url": {' + #13#10 +
@@ -111,13 +113,18 @@ begin
   end
   else
   begin
-    MsgBox('Não foi possível criar o arquivo appsettings.json.', mbError, MB_OK);
+    Log('Falha ao criar appsettings.json em: ' + ConfigPath);
+    MsgBox(
+      'Não foi possível criar o arquivo appsettings.json em:' + #13#10 + ConfigPath,
+      mbError,
+      MB_OK
+    );
   end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if CurStep = ssInstall then
+  if CurStep = ssPostInstall then
   begin
     CreateAppSettings();
   end;

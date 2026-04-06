@@ -1,5 +1,0 @@
-{
-  "portaApi": 3000,
-  "portaNavegadorDebugging": 9222,
-  "defaultUrlSignalR": "http://localhost:61201/WorkDeviceHub"
-}
